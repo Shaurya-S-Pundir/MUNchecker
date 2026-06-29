@@ -1,8 +1,5 @@
-import type { NextConfig } from 'next';
-
-const nextConfig: NextConfig = {
-  // Required for Google APIs on Vercel edge/serverless
-  serverExternalPackages: ['googleapis'],
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   // Avoid bundling googleapis on the client
   webpack: (config, { isServer }) => {
     if (!isServer) {

@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
 
@@ -8,18 +8,19 @@ const inter = Inter({
   display: 'swap',
 });
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: '#0f172a',
+};
+
 export const metadata: Metadata = {
   title: 'MUN Delegate Verification | QR Scanner',
   description:
     'Scan delegate QR codes for instant verification and attendance tracking at Model United Nations conferences.',
   keywords: ['MUN', 'delegate', 'verification', 'QR code', 'attendance'],
-  viewport: {
-    width: 'device-width',
-    initialScale: 1,
-    maximumScale: 1,
-    userScalable: false,
-  },
-  themeColor: '#0f172a',
 };
 
 export default function RootLayout({
