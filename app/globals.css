@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Custom properties ──────────────────────────────────────────────────── */
+:root {
+  --font-inter: 'Inter', system-ui, sans-serif;
+}
+
+/* ── Base resets ────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-inter);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #0f172a;
+  color: #f8fafc;
+}
+
+/* Full-viewport height using dvh for mobile browsers */
+.min-h-dvh {
+  min-height: 100dvh;
+}
+
+/* ── html5-qrcode overrides ─────────────────────────────────────────────── */
+#qr-reader {
+  width: 100% !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+#qr-reader__dashboard {
+  display: none !important;
+}
+
+#qr-reader video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  border-radius: 1rem;
+}
+
+#qr-reader__scan_region {
+  border: none !important;
+  background: transparent !important;
+}
+
+/* ── Scan line animation ────────────────────────────────────────────────── */
+@keyframes scanLine {
+  0% {
+    top: 8px;
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    top: calc(100% - 8px);
+    opacity: 0.8;
+  }
+}
+
+.scan-line {
+  position: absolute;
+  animation: scanLine 2s ease-in-out infinite alternate;
+  box-shadow: 0 0 8px 2px rgba(139, 92, 246, 0.6);
+}
+
+/* ── Slide-up animation ─────────────────────────────────────────────────── */
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ── Fade in ────────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.25s ease forwards;
+}
+
+/* ── Result screen wrapper ──────────────────────────────────────────────── */
+.result-screen {
+  width: 100%;
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 2px;
+}
