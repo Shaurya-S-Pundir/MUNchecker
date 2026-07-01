@@ -5,6 +5,10 @@ node_modules/
 .next/
 out/
 
+# Service account key files — NEVER commit these
+*.json.key
+calcium-centaur-501113-m9-f1ab3dcd4046.json
+
 # Environment files — NEVER commit these
 .env
 .env.local
