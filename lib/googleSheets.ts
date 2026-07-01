@@ -26,117 +26,161 @@ function getSheetId(): string {
   return id;
 }
 
+// ─── Column name resolution (env-overridable, case-insensitive matching) ──────
+
+function getColumnNames() {
+  return {
+    uuid:         'UUID',
+    name:         process.env.SHEET_COL_NAME        ?? 'Name',
+    committee:    process.env.SHEET_COL_COMMITTEE   ?? 'Committee',
+    portfolio:    process.env.SHEET_COL_PORTFOLIO   ?? 'Portfolio',
+    feeStatus:    process.env.SHEET_COL_FEE_STATUS  ?? 'Fee Status',
+    contact:      process.env.SHEET_COL_CONTACT     ?? 'Contact',
+    email:        process.env.SHEET_COL_EMAIL       ?? 'Email',
+    checkedIn:    'Checked In',
+    checkInTime:  'Check In Time',
+    device:       'Device',
+  };
+}
+
+type ColumnKey = keyof ReturnType<typeof getColumnNames>;
+
+/** Case-insensitive, trim-tolerant column index finder */
+function findColIndex(headers: string[], target: string): number {
+  if (!target) return -1;
+  const t = target.toLowerCase().trim();
+  return headers.findIndex(h => h.toLowerCase().trim() === t);
+}
+
+// ─── Header row auto-detection ────────────────────────────────────────────────
+
 /**
- * Returns list of tab names to search.
- * If GOOGLE_SHEET_TAB_NAME is set (and not "ALL"), use only that tab.
- * Otherwise, fetch all tab names from the spreadsheet.
+ * Scans the first 10 rows to find the header row.
+ * Looks for the row containing the "name" column header (case-insensitive).
+ * Returns the 0-based index within allRows.
  */
+function detectHeaderRowIndex(allRows: string[][]): number {
+  const nameCol = getColumnNames().name.toLowerCase().trim();
+  for (let i = 0; i < Math.min(allRows.length, 10); i++) {
+    if (allRows[i].some(cell => cell.toLowerCase().trim() === nameCol)) {
+      return i;
+    }
+  }
+  return 0; // fallback
+}
+
+/**
+ * After the header row, skip blank rows to find the first data row.
+ * Returns 0-based index within allRows.
+ */
+function detectDataStartIndex(allRows: string[][], headerIdx: number): number {
+  for (let i = headerIdx + 1; i < allRows.length; i++) {
+    if (allRows[i].some(cell => cell.trim() !== '')) return i;
+  }
+  return headerIdx + 1;
+}
+
+// ─── Tab list ─────────────────────────────────────────────────────────────────
+
 async function getTabsToSearch(): Promise<string[]> {
   const configured = process.env.GOOGLE_SHEET_TAB_NAME?.trim();
   if (configured && configured.toUpperCase() !== 'ALL' && configured !== '') {
     return [configured];
   }
-  // Fetch all tab names dynamically
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.get({ spreadsheetId: getSheetId() });
   return (res.data.sheets ?? [])
-    .map((s) => s.properties?.title ?? '')
+    .map(s => s.properties?.title ?? '')
     .filter(Boolean);
 }
 
-// ─── Column header mapping ────────────────────────────────────────────────────
-
-const COLUMN_MAP = {
-  uuid: 'UUID',
-  name: 'Name',
-  committee: 'Committee',
-  portfolio: 'Portfolio',
-  feeStatus: 'Fee Status',
-  contact: 'Contact',
-  email: 'Email',
-  checkedIn: 'Checked In',
-  checkInTime: 'Check In Time',
-  device: 'Device',
-} as const;
-
-type ColumnKey = keyof typeof COLUMN_MAP;
-
 // ─── Per-tab data fetch ───────────────────────────────────────────────────────
 
-async function getTabData(tabName: string): Promise<{
+interface TabData {
   headers: string[];
-  rows: Record<string, string>[];
-}> {
+  headerRowIndex: number;  // 0-based in allRows
+  rows: { data: Record<string, string>; sheetRowNum: number }[];
+}
+
+async function getTabData(tabName: string): Promise<TabData> {
   const sheets = getSheetsClient();
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: getSheetId(),
     range: tabName,
   });
 
-  const values = response.data.values ?? [];
-  if (values.length === 0) return { headers: [], rows: [] };
+  const allRows: string[][] = (response.data.values ?? []).map(row =>
+    (row as unknown[]).map(cell => String(cell ?? '').trim())
+  );
 
-  const [headerRow, ...dataRows] = values;
-  const headers: string[] = headerRow.map((h: unknown) => String(h ?? '').trim());
+  if (allRows.length === 0) return { headers: [], headerRowIndex: 0, rows: [] };
 
-  const rows = dataRows.map((row) => {
-    const obj: Record<string, string> = {};
-    headers.forEach((header, i) => {
-      obj[header] = String(row[i] ?? '').trim();
-    });
-    return obj;
+  const headerIdx = detectHeaderRowIndex(allRows);
+  const dataStartIdx = detectDataStartIndex(allRows, headerIdx);
+  const headers = allRows[headerIdx];
+
+  const rows = allRows.slice(dataStartIdx).map((row, i) => {
+    const sheetRowNum = dataStartIdx + i + 1; // 1-based sheet row number
+    const data: Record<string, string> = {};
+    headers.forEach((header, ci) => { data[header] = row[ci] ?? ''; });
+    return { data, sheetRowNum };
   });
 
-  return { headers, rows };
+  return { headers, headerRowIndex: headerIdx, rows };
 }
 
 // ─── Delegate lookup ──────────────────────────────────────────────────────────
 
-/**
- * Search all configured tabs for a delegate by UUID.
- * Returns null if not found in any tab.
- */
 export async function findDelegateByUUID(uuid: string): Promise<Delegate | null> {
   const tabs = await getTabsToSearch();
+  const cols = getColumnNames();
 
   for (const tabName of tabs) {
     try {
       const { headers, rows } = await getTabData(tabName);
-      const uuidHeader = COLUMN_MAP.uuid;
-      if (!headers.includes(uuidHeader)) continue; // tab doesn't have UUID column — skip
+      const uuidIdx = findColIndex(headers, cols.uuid);
+      if (uuidIdx === -1) continue; // no UUID column in this tab
 
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        if (row[uuidHeader]?.toLowerCase() === uuid.toLowerCase()) {
-          return rowToDelegate(row, i + 2, tabName); // +2: 1-based, skip header
+      for (const { data, sheetRowNum } of rows) {
+        const rowUUID = data[headers[uuidIdx]] ?? '';
+        if (rowUUID.toLowerCase() === uuid.toLowerCase()) {
+          return rowToDelegate(data, headers, sheetRowNum, tabName);
         }
       }
     } catch {
-      // If one tab fails to read (e.g. permissions), skip it and continue
-      continue;
+      continue; // skip tabs with read errors
     }
   }
-
   return null;
 }
 
 function rowToDelegate(
-  row: Record<string, string>,
+  data: Record<string, string>,
+  headers: string[],
   rowIndex: number,
-  sheetTab: string
+  sheetTab: string,
 ): Delegate {
-  const checkedInRaw = row[COLUMN_MAP.checkedIn]?.toUpperCase();
+  const cols = getColumnNames();
+
+  const get = (colName: string) => {
+    if (!colName) return '';
+    const idx = findColIndex(headers, colName);
+    return idx !== -1 ? (data[headers[idx]] ?? '') : '';
+  };
+
+  const checkedInRaw = get(cols.checkedIn).toUpperCase();
+
   return {
-    uuid: row[COLUMN_MAP.uuid] ?? '',
-    name: row[COLUMN_MAP.name] ?? '',
-    committee: row[COLUMN_MAP.committee] ?? '',
-    portfolio: row[COLUMN_MAP.portfolio] ?? '',
-    feeStatus: row[COLUMN_MAP.feeStatus] ?? '',
-    contact: row[COLUMN_MAP.contact] ?? '',
-    email: row[COLUMN_MAP.email] ?? '',
-    checkedIn: checkedInRaw === 'TRUE' || checkedInRaw === '1' || checkedInRaw === 'YES',
-    checkInTime: row[COLUMN_MAP.checkInTime] || null,
-    device: row[COLUMN_MAP.device] || null,
+    uuid:         get(cols.uuid),
+    name:         get(cols.name),
+    committee:    get(cols.committee) || sheetTab, // fallback to tab name
+    portfolio:    get(cols.portfolio),
+    feeStatus:    get(cols.feeStatus),
+    contact:      get(cols.contact),
+    email:        get(cols.email),
+    checkedIn:    checkedInRaw === 'TRUE' || checkedInRaw === '1' || checkedInRaw === 'YES',
+    checkInTime:  get(cols.checkInTime) || null,
+    device:       get(cols.device) || null,
     rowIndex,
     sheetTab,
   };
@@ -144,62 +188,85 @@ function rowToDelegate(
 
 // ─── Attendance update ────────────────────────────────────────────────────────
 
-/**
- * Update specific columns in a delegate's row by header name.
- * Uses delegate.sheetTab to target the correct tab.
- */
 export async function updateDelegateRow(
   delegate: Delegate,
   fields: Partial<Record<ColumnKey, string>>
 ): Promise<void> {
   const sheets = getSheetsClient();
-  const sheetId = getSheetId();
+  const cols = getColumnNames();
   const { rowIndex, sheetTab } = delegate;
-
-  // Re-fetch headers for this specific tab to get column positions
   const { headers } = await getTabData(sheetTab);
 
-  const data: sheets_v4.Schema$ValueRange[] = [];
+  const batchData: sheets_v4.Schema$ValueRange[] = [];
 
   for (const [key, value] of Object.entries(fields) as [ColumnKey, string][]) {
-    const headerName = COLUMN_MAP[key];
-    const colIndex = headers.indexOf(headerName);
-    if (colIndex === -1) continue; // Column doesn't exist in this tab — skip
+    const colName = cols[key];
+    let colIdx = findColIndex(headers, colName);
 
-    const colLetter = columnIndexToLetter(colIndex);
-    const range = `${sheetTab}!${colLetter}${rowIndex}`;
-    data.push({ range, values: [[value]] });
+    // Column doesn't exist yet — append it to the header row
+    if (colIdx === -1) {
+      colIdx = await appendColumnHeader(sheetTab, headers, colName);
+      headers.push(colName); // keep local copy in sync
+    }
+
+    const colLetter = columnIndexToLetter(colIdx);
+    batchData.push({
+      range: `${sheetTab}!${colLetter}${rowIndex}`,
+      values: [[value]],
+    });
   }
 
-  if (data.length === 0) return;
+  if (batchData.length === 0) return;
 
   await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId: sheetId,
-    requestBody: {
-      valueInputOption: 'USER_ENTERED',
-      data,
-    },
+    spreadsheetId: getSheetId(),
+    requestBody: { valueInputOption: 'USER_ENTERED', data: batchData },
   });
 }
 
-// ─── UUID write-back (used by QR generation script) ──────────────────────────
+// ─── Column management ────────────────────────────────────────────────────────
 
-export async function writeUUID(
+/**
+ * Append a new column header to the end of the header row.
+ * Returns the new 0-based column index.
+ */
+export async function appendColumnHeader(
   tabName: string,
-  rowIndex: number,
-  uuid: string,
-  headers: string[]
-): Promise<void> {
+  currentHeaders: string[],
+  newHeader: string,
+  headerSheetRow?: number,
+): Promise<number> {
   const sheets = getSheetsClient();
-  const colIndex = headers.indexOf(COLUMN_MAP.uuid);
-  if (colIndex === -1) throw new Error(`Column "${COLUMN_MAP.uuid}" not found in tab "${tabName}".`);
+  const newColIdx = currentHeaders.length;
+  const colLetter = columnIndexToLetter(newColIdx);
 
-  const colLetter = columnIndexToLetter(colIndex);
+  // headerSheetRow defaults to 1 if not provided; caller should pass correct row
+  const row = headerSheetRow ?? 1;
+
   await sheets.spreadsheets.values.update({
     spreadsheetId: getSheetId(),
-    range: `${tabName}!${colLetter}${rowIndex}`,
+    range: `${tabName}!${colLetter}${row}`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [[uuid]] },
+    requestBody: { values: [[newHeader]] },
+  });
+  return newColIdx;
+}
+
+// ─── UUID write-back (for QR generation script) ───────────────────────────────
+
+export async function writeCell(
+  tabName: string,
+  sheetRowNum: number,
+  colIdx: number,
+  value: string,
+): Promise<void> {
+  const sheets = getSheetsClient();
+  const colLetter = columnIndexToLetter(colIdx);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: getSheetId(),
+    range: `${tabName}!${colLetter}${sheetRowNum}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[value]] },
   });
 }
 
@@ -214,7 +281,5 @@ function columnIndexToLetter(index: number): string {
   }
   return letter;
 }
-
-// ─── Exports for QR generation script ────────────────────────────────────────
 
 export { getTabsToSearch, getTabData };
