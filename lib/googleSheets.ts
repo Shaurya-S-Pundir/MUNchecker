@@ -5,23 +5,15 @@ import { Delegate } from '@/types/delegate';
 
 function getAuth() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) {
-    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.');
-  }
-
-  let credentials: object;
+  if (!raw) throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.');
   try {
-    credentials = JSON.parse(raw);
+    return new google.auth.GoogleAuth({
+      credentials: JSON.parse(raw),
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
   } catch {
     throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.');
   }
-
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
-
-  return auth;
 }
 
 function getSheetsClient(): sheets_v4.Sheets {
@@ -34,14 +26,26 @@ function getSheetId(): string {
   return id;
 }
 
-function getTabName(): string {
-  return process.env.GOOGLE_SHEET_TAB_NAME ?? 'Sheet1';
+/**
+ * Returns list of tab names to search.
+ * If GOOGLE_SHEET_TAB_NAME is set (and not "ALL"), use only that tab.
+ * Otherwise, fetch all tab names from the spreadsheet.
+ */
+async function getTabsToSearch(): Promise<string[]> {
+  const configured = process.env.GOOGLE_SHEET_TAB_NAME?.trim();
+  if (configured && configured.toUpperCase() !== 'ALL' && configured !== '') {
+    return [configured];
+  }
+  // Fetch all tab names dynamically
+  const sheets = getSheetsClient();
+  const res = await sheets.spreadsheets.get({ spreadsheetId: getSheetId() });
+  return (res.data.sheets ?? [])
+    .map((s) => s.properties?.title ?? '')
+    .filter(Boolean);
 }
 
 // ─── Column header mapping ────────────────────────────────────────────────────
 
-// Canonical column names used in business logic.
-// Map our internal keys to the expected sheet header strings.
 const COLUMN_MAP = {
   uuid: 'UUID',
   name: 'Name',
@@ -57,30 +61,20 @@ const COLUMN_MAP = {
 
 type ColumnKey = keyof typeof COLUMN_MAP;
 
-// ─── Raw sheet helpers ────────────────────────────────────────────────────────
+// ─── Per-tab data fetch ───────────────────────────────────────────────────────
 
-/**
- * Fetch all rows from the sheet as an array of objects keyed by header name.
- * Returns header row separately so callers can compute column indices.
- */
-export async function getSheetData(): Promise<{
+async function getTabData(tabName: string): Promise<{
   headers: string[];
   rows: Record<string, string>[];
-  rawRows: string[][];
 }> {
   const sheets = getSheetsClient();
-  const sheetId = getSheetId();
-  const tab = getTabName();
-
   const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: tab,
+    spreadsheetId: getSheetId(),
+    range: tabName,
   });
 
   const values = response.data.values ?? [];
-  if (values.length === 0) {
-    return { headers: [], rows: [], rawRows: [] };
-  }
+  if (values.length === 0) return { headers: [], rows: [] };
 
   const [headerRow, ...dataRows] = values;
   const headers: string[] = headerRow.map((h: unknown) => String(h ?? '').trim());
@@ -93,37 +87,44 @@ export async function getSheetData(): Promise<{
     return obj;
   });
 
-  return { headers, rows, rawRows: dataRows };
+  return { headers, rows };
 }
 
 // ─── Delegate lookup ──────────────────────────────────────────────────────────
 
 /**
- * Find a delegate by UUID. Returns the delegate and their 1-based row index
- * (row 1 = headers, row 2 = first data row).
+ * Search all configured tabs for a delegate by UUID.
+ * Returns null if not found in any tab.
  */
-export async function findDelegateByUUID(
-  uuid: string
-): Promise<Delegate | null> {
-  const { headers, rows } = await getSheetData();
+export async function findDelegateByUUID(uuid: string): Promise<Delegate | null> {
+  const tabs = await getTabsToSearch();
 
-  const uuidHeader = COLUMN_MAP.uuid;
-  const uuidColIndex = headers.indexOf(uuidHeader);
-  if (uuidColIndex === -1) {
-    throw new Error(`Column "${uuidHeader}" not found in sheet headers.`);
-  }
+  for (const tabName of tabs) {
+    try {
+      const { headers, rows } = await getTabData(tabName);
+      const uuidHeader = COLUMN_MAP.uuid;
+      if (!headers.includes(uuidHeader)) continue; // tab doesn't have UUID column — skip
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (row[uuidHeader]?.toLowerCase() === uuid.toLowerCase()) {
-      return rowToDelegate(row, i + 2); // +2: 1-based, skip header
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (row[uuidHeader]?.toLowerCase() === uuid.toLowerCase()) {
+          return rowToDelegate(row, i + 2, tabName); // +2: 1-based, skip header
+        }
+      }
+    } catch {
+      // If one tab fails to read (e.g. permissions), skip it and continue
+      continue;
     }
   }
 
   return null;
 }
 
-function rowToDelegate(row: Record<string, string>, rowIndex: number): Delegate {
+function rowToDelegate(
+  row: Record<string, string>,
+  rowIndex: number,
+  sheetTab: string
+): Delegate {
   const checkedInRaw = row[COLUMN_MAP.checkedIn]?.toUpperCase();
   return {
     uuid: row[COLUMN_MAP.uuid] ?? '',
@@ -137,6 +138,7 @@ function rowToDelegate(row: Record<string, string>, rowIndex: number): Delegate 
     checkInTime: row[COLUMN_MAP.checkInTime] || null,
     device: row[COLUMN_MAP.device] || null,
     rowIndex,
+    sheetTab,
   };
 }
 
@@ -144,33 +146,29 @@ function rowToDelegate(row: Record<string, string>, rowIndex: number): Delegate 
 
 /**
  * Update specific columns in a delegate's row by header name.
- * Only modifies the supplied fields; leaves all other columns untouched.
+ * Uses delegate.sheetTab to target the correct tab.
  */
 export async function updateDelegateRow(
-  rowIndex: number,
+  delegate: Delegate,
   fields: Partial<Record<ColumnKey, string>>
 ): Promise<void> {
   const sheets = getSheetsClient();
   const sheetId = getSheetId();
-  const tab = getTabName();
+  const { rowIndex, sheetTab } = delegate;
 
-  // We need the current headers to compute column letters
-  const { headers } = await getSheetData();
+  // Re-fetch headers for this specific tab to get column positions
+  const { headers } = await getTabData(sheetTab);
 
   const data: sheets_v4.Schema$ValueRange[] = [];
 
   for (const [key, value] of Object.entries(fields) as [ColumnKey, string][]) {
     const headerName = COLUMN_MAP[key];
     const colIndex = headers.indexOf(headerName);
-    if (colIndex === -1) continue; // Column doesn't exist yet — skip gracefully
+    if (colIndex === -1) continue; // Column doesn't exist in this tab — skip
 
     const colLetter = columnIndexToLetter(colIndex);
-    const range = `${tab}!${colLetter}${rowIndex}`;
-
-    data.push({
-      range,
-      values: [[value]],
-    });
+    const range = `${sheetTab}!${colLetter}${rowIndex}`;
+    data.push({ range, values: [[value]] });
   }
 
   if (data.length === 0) return;
@@ -186,24 +184,20 @@ export async function updateDelegateRow(
 
 // ─── UUID write-back (used by QR generation script) ──────────────────────────
 
-/**
- * Write a UUID into a specific cell identified by row index.
- */
-export async function writeUUID(rowIndex: number, uuid: string): Promise<void> {
+export async function writeUUID(
+  tabName: string,
+  rowIndex: number,
+  uuid: string,
+  headers: string[]
+): Promise<void> {
   const sheets = getSheetsClient();
-  const sheetId = getSheetId();
-  const tab = getTabName();
-
-  const { headers } = await getSheetData();
   const colIndex = headers.indexOf(COLUMN_MAP.uuid);
-  if (colIndex === -1) {
-    throw new Error(`Column "${COLUMN_MAP.uuid}" not found in sheet.`);
-  }
+  if (colIndex === -1) throw new Error(`Column "${COLUMN_MAP.uuid}" not found in tab "${tabName}".`);
 
   const colLetter = columnIndexToLetter(colIndex);
   await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `${tab}!${colLetter}${rowIndex}`,
+    spreadsheetId: getSheetId(),
+    range: `${tabName}!${colLetter}${rowIndex}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [[uuid]] },
   });
@@ -211,7 +205,6 @@ export async function writeUUID(rowIndex: number, uuid: string): Promise<void> {
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-/** Convert 0-based column index to sheet column letter (A, B, ..., Z, AA, ...) */
 function columnIndexToLetter(index: number): string {
   let letter = '';
   let n = index;
@@ -221,3 +214,7 @@ function columnIndexToLetter(index: number): string {
   }
   return letter;
 }
+
+// ─── Exports for QR generation script ────────────────────────────────────────
+
+export { getTabsToSearch, getTabData };

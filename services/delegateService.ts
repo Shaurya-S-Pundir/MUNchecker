@@ -72,7 +72,7 @@ export async function recordAttendance(
       second: '2-digit',
     });
 
-    await updateDelegateRow(delegate.rowIndex, {
+    await updateDelegateRow(delegate, {
       checkedIn: 'TRUE',
       checkInTime: now,
       device: userAgent.slice(0, 500), // cap length

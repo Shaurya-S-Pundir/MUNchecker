@@ -10,6 +10,7 @@ export interface Delegate {
   checkInTime: string | null;
   device: string | null;
   rowIndex: number; // 1-based sheet row index (header = row 1, first data row = row 2)
+  sheetTab: string; // which tab this delegate lives in
 }
 
 export type ScanResult =
