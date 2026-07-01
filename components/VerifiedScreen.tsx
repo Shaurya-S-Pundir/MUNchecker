@@ -10,22 +10,16 @@ interface VerifiedScreenProps {
 }
 
 export default function VerifiedScreen({ delegate, onClose }: VerifiedScreenProps) {
-  const isPaid = delegate.feeStatus.toLowerCase() === 'paid';
   const [attendanceRecorded, setAttendanceRecorded] = useState(false);
-  const [attendanceLoading, setAttendanceLoading] = useState(false);
   const [attendanceError, setAttendanceError] = useState<string | null>(null);
 
-  // Auto-record attendance for paid delegates
+  // Auto-record attendance immediately on scan — no payment check
   useEffect(() => {
-    if (isPaid) {
-      recordAttendance();
-    }
+    recordAttendance();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function recordAttendance() {
-    setAttendanceLoading(true);
-    setAttendanceError(null);
     try {
       const res = await fetch('/api/attendance', {
         method: 'POST',
@@ -41,8 +35,6 @@ export default function VerifiedScreen({ delegate, onClose }: VerifiedScreenProp
       }
     } catch {
       setAttendanceError('Network error — could not record attendance.');
-    } finally {
-      setAttendanceLoading(false);
     }
   }
 
@@ -65,43 +57,11 @@ export default function VerifiedScreen({ delegate, onClose }: VerifiedScreenProp
         <InfoRow label="Committee" value={delegate.committee} />
         <InfoRow label="Portfolio" value={delegate.portfolio} />
         <Divider />
-        <InfoRow label="Fee Status" value={delegate.feeStatus} highlight={isPaid ? 'paid' : 'unpaid'} />
-        <Divider />
         <InfoRow label="Contact" value={delegate.contact} />
         <InfoRow label="Email" value={delegate.email} mono />
       </div>
 
-      {/* Fee status section */}
-      {!isPaid && !attendanceRecorded && (
-        <div className="bg-amber-900/30 border border-amber-500/40 rounded-2xl p-5 mb-5">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-amber-400 text-xl">⚠</span>
-            <span className="text-amber-400 font-bold text-lg">Fee Pending</span>
-          </div>
-          <p className="text-slate-300 text-sm mb-4">
-            This delegate has not paid the registration fee. Press the button below only after collecting payment.
-          </p>
-          {attendanceError && (
-            <p className="text-red-400 text-sm mb-3">{attendanceError}</p>
-          )}
-          <button
-            onClick={recordAttendance}
-            disabled={attendanceLoading}
-            className="w-full py-4 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-900 font-bold text-lg rounded-xl transition-all duration-200 active:scale-95"
-          >
-            {attendanceLoading ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-5 h-5 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
-                Recording…
-              </span>
-            ) : (
-              'Validate Entry'
-            )}
-          </button>
-        </div>
-      )}
-
-      {/* Attendance confirmed */}
+      {/* Attendance status */}
       {attendanceRecorded && (
         <div className="flex items-center gap-2 bg-emerald-900/30 border border-emerald-500/40 rounded-xl px-4 py-3 mb-5">
           <span className="text-emerald-400 text-xl">✓</span>
@@ -109,21 +69,17 @@ export default function VerifiedScreen({ delegate, onClose }: VerifiedScreenProp
         </div>
       )}
 
-      {/* Auto-recording spinner */}
-      {isPaid && attendanceLoading && (
+      {!attendanceRecorded && !attendanceError && (
         <div className="flex items-center gap-2 text-slate-400 text-sm mb-5">
           <span className="w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
           Recording attendance…
         </div>
       )}
 
-      {attendanceError && isPaid && (
+      {attendanceError && (
         <div className="bg-red-900/30 border border-red-500/40 rounded-xl px-4 py-3 mb-5">
           <p className="text-red-400 text-sm">{attendanceError}</p>
-          <button
-            onClick={recordAttendance}
-            className="mt-2 text-sm text-red-300 underline"
-          >
+          <button onClick={recordAttendance} className="mt-2 text-sm text-red-300 underline">
             Retry
           </button>
         </div>
@@ -141,31 +97,19 @@ export default function VerifiedScreen({ delegate, onClose }: VerifiedScreenProp
 }
 
 function InfoRow({
-  label,
-  value,
-  large,
-  mono,
-  highlight,
+  label, value, large, mono,
 }: {
-  label: string;
-  value: string;
-  large?: boolean;
-  mono?: boolean;
-  highlight?: 'paid' | 'unpaid';
+  label: string; value: string; large?: boolean; mono?: boolean;
 }) {
-  const valueClass = [
-    large ? 'text-xl font-bold text-white' : 'text-base text-slate-200',
-    mono ? 'font-mono text-sm' : '',
-    highlight === 'paid' ? 'text-emerald-400 font-semibold' : '',
-    highlight === 'unpaid' ? 'text-amber-400 font-semibold' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-xs text-slate-500 uppercase tracking-widest">{label}</span>
-      <span className={valueClass}>{value || '—'}</span>
+      <span className={[
+        large ? 'text-xl font-bold text-white' : 'text-base text-slate-200',
+        mono ? 'font-mono text-sm' : '',
+      ].filter(Boolean).join(' ')}>
+        {value || '—'}
+      </span>
     </div>
   );
 }
